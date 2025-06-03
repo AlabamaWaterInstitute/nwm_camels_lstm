@@ -40,7 +40,6 @@ from rich.progress import (
 )
 
 
-
 logger = logging.getLogger(__name__)
 # Suppress the specific warning from numpy to keep the cli output clean
 warnings.filterwarnings(
@@ -340,6 +339,7 @@ def compute_zonal_stats(
     forcings_dir : Path
         Path to directory where outputs are to be stored.
     '''
+
     merged_data = merged_data.drop_vars(["crs"])
     logger.info("Computing zonal stats in parallel for all timesteps")
     timer_start = time.time()
@@ -380,6 +380,11 @@ def compute_zonal_stats(
         "[cyan]Processing variables...", total=len(variables), elapsed=0
     )
     progress.start()
+    try:
+        client = Client.current()
+    except ValueError:
+        cluster = LocalCluster()
+        client = Client(cluster)
     for variable in list(merged_data.data_vars):
         progress.update(variable_task, advance=1)
         progress.update(variable_task, description=f"Processing {variable}")
@@ -429,19 +434,26 @@ def compute_zonal_stats(
             concatenated_da.to_dataset(name=variable).to_netcdf(
                 forcings_dir / "temp" / f"{variable}_timechunk_{i}.nc"
             )
-        # Merge the chunks back together
+
         datasets = [
-            xr.open_dataset(forcings_dir / "temp" / f"{variable}_timechunk_{i}.nc")
+            xr.open_dataset(forcings_dir / "temp" / f"{variable}_timechunk_{i}.nc", cache=False)
             for i in range(len(time_chunks))
         ]
-        result = xr.concat(datasets, dim="time")
-        result.to_netcdf(forcings_dir / "temp" / f"{variable}.nc")
+
+        # result = xr.concat(datasets, dim="time")
+
+        xr.concat(datasets, dim="time").to_netcdf(forcings_dir / "temp" / f"{variable}.nc")
+        # result.to_netcdf(forcings_dir / "temp" / f"{variable}.nc")
+
         # close the datasets
-        result.close()
+        # result.close()
         _ = [dataset.close() for dataset in datasets]
+        del datasets
         for file in forcings_dir.glob("temp/*_timechunk_*.nc"):
             file.unlink()
         progress.remove_task(chunk_task)
+
+            
     progress.update(
         variable_task,
         description=f"Forcings processed in {time.perf_counter() - timer:2f} seconds",

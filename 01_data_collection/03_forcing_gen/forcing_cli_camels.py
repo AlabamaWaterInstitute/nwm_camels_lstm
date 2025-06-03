@@ -15,6 +15,8 @@ import shutil
 import json
 import geopandas as gpd
 import xarray as xr
+import os
+# from memory_profiler import profile
 
 from modules.custom_logging import setup_logging
 from modules.forcings import compute_zonal_stats
@@ -103,6 +105,7 @@ def process_catchment(geometries_dict, output_dir, camels_basin, merged_data):
     catchment_dir = Path(f"{output_dir}/{camels_basin}/")
     if not catchment_dir.exists():
         catchment_dir.mkdir()
+        logging.debug("Created directory: %s", catchment_dir)
 
     output_file = Path(f"{output_dir}/{camels_basin}/{camels_basin}-aggregated.nc")
     if not output_file.exists():
@@ -110,6 +113,7 @@ def process_catchment(geometries_dict, output_dir, camels_basin, merged_data):
         forcing_working_dir = Path(f"{output_dir}/{camels_basin}/{camels_basin}-working-dir/")
         if not forcing_working_dir.exists():
             forcing_working_dir.mkdir(parents=True, exist_ok=True)
+            logging.debug("Created working directory: %s", forcing_working_dir)
 
         temp_dir = forcing_working_dir / "temp"
         if not temp_dir.exists():
@@ -117,12 +121,16 @@ def process_catchment(geometries_dict, output_dir, camels_basin, merged_data):
         geometries_dict = geometries_dict.to_crs(merged_data.crs.esri_pe_string)
         print(geometries_dict.dtypes)
         compute_zonal_stats(geometries_dict, merged_data, forcing_working_dir)
+        logging.debug("Computed zonal stats for %s", camels_basin)
 
         shutil.copy(forcing_working_dir / "forcings.nc", output_file)
         logging.info("Created forcings file: %s", output_file)
         # remove the working directory
         shutil.rmtree(forcing_working_dir)
+        # print(f"Removing working directory: {cached_nc_path}")
+        # cached_nc_path.unlink()
 
+# @profile
 def main() -> None:
     """Main function to generate forcing data for CAMELS basins."""
     time.sleep(0.01)
@@ -179,16 +187,25 @@ def main() -> None:
 
         # get raw gridded data for entire upstream region of basin
         cached_nc_path = Path(f"raw_output/{k}-raw-gridded-data.nc")
-        if not cached_nc_path.exists():
-            logging.debug("cached nc path: %s", cached_nc_path)
-            merged_data = get_forcing_data(cached_nc_path,
-                                        start_time,
-                                        end_time,
-                                        total_gdf)
-        else:
-            merged_data = xr.open_dataset(cached_nc_path)
-        # process the catchment and all its upstreams
-        process_catchment(gdf_id, args.output_dir, camels_basin, merged_data)
+        aggregated_nc_path = Path(f"outputcamels/{k}/{k}-aggregated.nc")
+        if not aggregated_nc_path.exists():
+            if not cached_nc_path.exists():
+                logging.debug("cached nc path: %s", cached_nc_path)
+                merged_data = get_forcing_data(cached_nc_path,
+                                            start_time,
+                                            end_time,
+                                            total_gdf)
+            else:
+                merged_data = xr.open_dataset(cached_nc_path)
+                # process the catchment and all its upstreams
+
+            process_catchment(gdf_id, args.output_dir, camels_basin, merged_data)
+
+        
+        if cached_nc_path.exists():
+            # remove the cached nc file
+            cached_nc_path.unlink()
+            logging.debug("Removing cached nc file: %s", cached_nc_path)
 
 if __name__ == "__main__":
     main()
