@@ -3,6 +3,11 @@
 Heavily inspired by the original code by Josh Cunningham (GitHub: @JoshCu)
 https://github.com/CIROH-UA/NGIAB_data_preprocess
 
+Hydrofabric files sourced from:
+https://water.noaa.gov/resources/downloads/nwm/NWM_channel_hydrofabric.tar.gz
+Download, unzip, use GeoPandas to read the hydrofabric file's nwm_reaches_conus layer
+and nwm_catchments_conus layer, and save as parquet files.
+
 Written by Quinn Lee (GitHub: @quinnylee)
 """
 
