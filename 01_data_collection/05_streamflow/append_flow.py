@@ -9,13 +9,19 @@ from s3fs import S3FileSystem
 from typing import Optional
 from s3fs.core import _error_wrapper, version_id_kw
 import asyncio
-from dask.distributed import Client, LocalCluster, progress
+from dask.distributed import Client, LocalCluster
 import logging
 import xarray as xr
 import os
 from concurrent.futures import ProcessPoolExecutor
 from glob import glob
 from functools import partial
+import json
+import numpy as np
+from tqdm import tqdm
+import shutil
+import tempfile
+from concurrent.futures import as_completed
 
 class S3ParallelFileSystem(S3FileSystem):
     """S3FileSystem subclass that supports parallel downloads"""
@@ -95,7 +101,7 @@ def download_nwm_output(start_time, end_time, feature_ids) -> xr.Dataset:
     try:
         client = Client.current()
     except ValueError:
-        cluster = LocalCluster()
+        cluster = LocalCluster(dashboard_address=":8787")
         client = Client(cluster)
 
     logging.debug("Creating s3fs object")
@@ -109,18 +115,21 @@ def download_nwm_output(start_time, end_time, feature_ids) -> xr.Dataset:
     dataset = xr.open_zarr(store, consolidated=True, chunks=None)
 
     # select the feature_id
+    # Ensure feature_ids is a list or array
     logging.debug("Selecting feature_id")
     dataset = dataset.sel(time=slice(start_time, end_time), feature_id=feature_ids)
 
     # drop everything except coordinates feature_id, gage_id, time and variables streamflow
-    dataset = dataset["streamflow"]
-    # print(dataset)
+    dataset = dataset.rename({"feature_id": "catchment_id"})
+    dataset = dataset["streamflow"].transpose("catchment_id", "time")
+    
+    print(dataset)
     logging.debug("Computing dataset")
     logging.debug("Dataset: %s", dataset)
 
     return dataset
 
-def update_netcdf(pair_file: str, zarr_store: xr.Dataset) -> None:
+def update_netcdf(basin_file: str, zarr_store: xr.Dataset) -> None:
     '''
     This function opens a pair's NetCDF file, extracts the corresponding
     streamflow time series from the Zarr store, appends the streamflow data,
@@ -128,74 +137,89 @@ def update_netcdf(pair_file: str, zarr_store: xr.Dataset) -> None:
     '''
     try:
         # Extract site IDs from filename
-        pair_id = os.path.splitext(os.path.basename(pair_file))[0]
-        head_id = int(pair_id.split('-')[0])
-        tail_id = int(pair_id.split('-')[1])
-        # print("got ids")
         # Open the pair's NetCDF file
-        ds_nc = xr.open_dataset(pair_file)
+        ds_nc = xr.open_dataset(f"../03_forcing_gen/outputcamels/{basin_file}/{basin_file}-aggregated.nc", engine="netcdf4", chunks={})
+        logging.info(f"Opened NetCDF file for {basin_file}")
         # print("opened nc file")
         # There is a time mismatch between the zarr chrtout file and the netcdf
         # forcings I generated. The zarr file cuts off at 2023-02-01, whereas
         # the netcdf forcings go to 2024-09-30. I don't know why, probably just
         # based on how recently our sources updated.
-        subset_ds_nc = ds_nc.isel(time=slice(0, 379897)) 
-        # print("subset nc")
-        # Ensure site ID exists in Zarr store
-        if head_id not in zarr_store['feature_id'].values:
-            print(f"Skipping {head_id}, not found in Zarr store.")
-            return
-        if tail_id not in zarr_store['feature_id'].values:
-            print(f"Skipping {tail_id}, not found in Zarr store.")
-            return
-        
-        # Extract the corresponding streamflow data and match it to NetCDF 
-        # # format
-        head_streamflow_data = zarr_store['streamflow'].sel(feature_id=head_id)
-        head_streamflow_data = head_streamflow_data.interp_like(subset_ds_nc)
-        # print("extracted head data")
-        tail_streamflow_data = zarr_store['streamflow'].sel(feature_id=tail_id)
-        tail_streamflow_data = tail_streamflow_data.interp_like(subset_ds_nc)
-        # print("extracted tail data")
-        # head_streamflow_array = zarr_store.sel(feature_id=head_id)
-        # print(head_streamflow_array[:10].values)
-
-        # Append to NetCDF file
-        subset_ds_nc["streamflow"] = xr.DataArray(
-            head_streamflow_data, dims=["time"])
-        subset_ds_nc["streamflow_d"] = xr.DataArray(
-            tail_streamflow_data, dims=["time"])
+        subset_ds_nc = ds_nc.isel(time=slice(0, 379897))
+                                  
+        combined = xr.merge([subset_ds_nc, zarr_store])
+        logging.info(f"Merged datasets for {basin_file}")
+        logging.info(combined)
         # print("appended data")
         # Save updated file
         # Note to Sonam: we can change this location to {pair_file} and 
         # overwrite the original pair-specific NetCDFs if we are confident in 
         # this process.
-        subset_ds_nc.to_netcdf(f"/media/volume/NeuralHydrology/Test_Quinn_Data/completed_forcings/{pair_id}.nc", mode="w") 
-        print(f"Updated {pair_file}")
+        combined.to_netcdf(f"./corrected/{basin_file}.nc", mode="w", engine="netcdf4")
+        
+        logging.info(f"Saved updated NetCDF file for {basin_file}")
 
     except Exception as e:
-        print(f"Error processing {pair_file}: {e}")
+        print(f"Error processing {basin_file}: {e}")
 
 def main():
+    logging.basicConfig(level=logging.INFO)
 
-    # Open Zarr store
-    zarr_store = xr.open_zarr("/home/exouser/nwm_network_lstm_test/data_collection_preprocess/camels_sf.zarr")
-
-    # Get list of NetCDF files
-    # Note to Sonam: I picked a folder with a small number of files for testing.
-    # If we want to do all the forcings, our glob will look like
-    # # "/media/volume/NeuralHydrology/Test_Quinn_Data/forcings/*/*/*.nc"
+    # # Get list of NetCDF files
     netcdf_files = glob(
-        "/media/volume/NeuralHydrology/Test_Quinn_Data/uncorrected_forcing_files/*/*.nc")
+        "../03_forcing_gen/outputcamels/*/*-aggregated.nc")
     
-    # Create a partial function that always includes zarr_store
-    update_netcdf_partial = partial(update_netcdf, zarr_store=zarr_store)
+    # get all feature ids from json dictionary 
+    with open("../02_get_upstream_basins/output/camels_upstream_dict.json", "r") as f:
+        feature_id_dict = json.load(f)
 
-    # Note to Sonam: we can change the number of workers if we upgrade out of 
-    # the small instance
-    with ProcessPoolExecutor(max_workers=25) as executor:
-        print("executing process")
-        executor.map(update_netcdf_partial, netcdf_files)
+    for file in netcdf_files:
+        catid = os.path.basename(file).split('-')[0]
+        logging.info(f"Processing file: {file} with catchment ID: {catid}")
+
+        ds = xr.open_dataset(file, engine="netcdf4")
+
+        catchment_ids = ds['ids'].values
+        catchment_ids = [int(catchment_id) for catchment_id in catchment_ids]
+
+        logging.info("Downloading dataset...")
+        zarr_store = download_nwm_output("1979-10-01", "2023-02-01", catchment_ids)
+        logging.info(zarr_store)
+        # zarr_path = "./camels_sf.zarr"
+
+        logging.info("Saving dataset...")
+        update_netcdf(catid, zarr_store)
+    # first = True
+    # for chunk in tqdm(catchment_chunks, desc="writing chunks", unit="chunk"):
+    #     chunked_data = zarr_store.sel(feature_id=chunk)
+    #     if first:
+    #         # First chunk: create the store
+    #         chunked_data.to_zarr(zarr_path, mode="w")
+    #         first = False
+    #     else:
+    #         # Append to store along feature_id
+    #         chunked_data.to_zarr(zarr_path, mode="a", append_dim="feature_id")
+
+
+    # print(feature_ids)
+    # # Open Zarr store
+
+
+
+    # # # Save Zarr store to local disk
+    # logging.info("Saving dataset to local disk...")
+    # zarr_store.to_zarr("./camels_sf.zarr", mode="w")
+
+    
+    
+    # # # Create a partial function that always includes zarr_store
+    # update_netcdf_partial = partial(update_netcdf, zarr_store=zarr_store)
+
+    # # # Note to Sonam: we can change the number of workers if we upgrade out of 
+    # # # the small instance
+    # with ProcessPoolExecutor(max_workers=16) as executor:
+    #     print("executing process")
+    #     executor.map(update_netcdf_partial, netcdf_files)
 
 if __name__ == "__main__":
     main()
