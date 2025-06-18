@@ -90,12 +90,6 @@ class S3ParallelFileSystem(S3FileSystem):
 
         return await _error_wrapper(_call_and_read, retries=self.retries)
 
-
-
-
-    # data = xr.open_mfdataset(cached_nc_path, parallel=True, engine="h5netcdf")
-    # return data
-
 def read_key_value_file(filepath):
     """Reads all keys and values into one list"""
     with open(filepath, "r", encoding="utf-8") as file:
@@ -171,3 +165,6 @@ def main():
             client = Client(cluster)
 
         dataset.to_netcdf(f"./uncorrected/{key}-streamflow.nc")
+
+if __name__== "__main__":
+    main()
