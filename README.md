@@ -1,6 +1,5 @@
 # NWM/CAMELS-based Streamflow Reconstruction using LSTM
 
-# DEVELOPMENT SHOULD CONTINUE ON https://github.com/AlabamaWaterInstitute/nwm_camels_lstm
 This repository contains tools used to preprocess and run long-short term memory (LSTM) models to reconstruct streamflow in ungaged locations upstream of Catchment Attributes and MEteorology for Large-sample Studies (CAMELS) basins. Using a known gage value (the CAMELS USGS gaged streamflow) as an input into an LSTM, as well as other meteorological and geographical inputs sourced from the National Water Model (NWM) 3.0 retrospective dataset, we use the LSTM outputs to reconstruct streamflow at upstream ungaged locations.
 
 The contents of this repository are chronologically ordered as follows:
