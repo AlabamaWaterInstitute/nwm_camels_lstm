@@ -193,16 +193,21 @@ def compute_zonal_stats(gdf: gpd.GeoDataFrame, merged_data: xr.Dataset, forcings
     """
     timer_start = time.time()
 
-    try:
-        client = Client.current()
-        logger.info("Using existing Dask client.")
-    except ValueError:
-        # Force Dask to use only ONE worker. This gives that worker
-        # the maximum possible memory to avoid crashing.
-        # Adjust '28GB' to a safe value for your system (e.g., 80% of total RAM).
-        cluster = LocalCluster(n_workers=2, memory_limit='28GB')
-        client = Client(cluster)
-        logger.info("Started new local Dask client with 1 worker to maximize memory safety.")
+    #  try:
+    #     client = Client.current()
+    #     logger.info("Using existing Dask client.")
+    # except ValueError:
+    #     # Force Dask to use only ONE worker. This gives that worker
+    #     # the maximum possible memory to avoid crashing.
+    #     # Adjust '28GB' to a safe value for your system (e.g., 80% of total RAM).
+    #     cluster = LocalCluster(n_workers=2, memory_limit='28GB')
+    #     client = Client(cluster)
+    #     logger.info("Started new local Dask client with 1 worker to maximize memory safety.") 
+
+    # Explicitly create and manage the Dask cluster
+    with LocalCluster(n_workers=2, memory_limit='28GB') as cluster:
+        with Client(cluster) as client:
+            logger.info(f"Started Dask client with {len(client.scheduler_info()['workers'])} workers.")
 
     variables_map = {
         "LWDOWN": "DLWRF_surface", "PSFC": "PRES_surface", "Q2D": "SPFH_2maboveground",
