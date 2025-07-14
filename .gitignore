@@ -6,3 +6,6 @@
 scratch.ipynb
 01_data_collection/hfv3_conus*
 01_data_collection/RouteLink_CONUS.nc
+index.html
+01_data_collection/05_streamflow/get_flow.ipynb
+01_data_collection/05_streamflow/append_flow.py
