@@ -205,7 +205,7 @@ def compute_zonal_stats(gdf: gpd.GeoDataFrame, merged_data: xr.Dataset, forcings
     #     logger.info("Started new local Dask client with 1 worker to maximize memory safety.") 
 
     # Explicitly create and manage the Dask cluster
-    with LocalCluster(n_workers=2, memory_limit='28GB') as cluster:
+    with LocalCluster() as cluster:
         with Client(cluster) as client:
             logger.info(f"Started Dask client with {len(client.scheduler_info()['workers'])} workers.")
 
