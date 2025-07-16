@@ -1,3 +1,10 @@
+"""
+Completes preprocessing step 2 (see issue #2 )
+https://github.com/AlabamaWaterInstitute/nwm_camels_lstm/issues/2
+
+Written by Pratiksha Chaudhari (GitHub: @pratikshac15) and Quinn Lee (GitHub: @quinnylee)
+"""
+
 import argparse
 import logging
 import time
