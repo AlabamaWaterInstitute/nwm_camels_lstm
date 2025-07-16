@@ -1,0 +1,268 @@
+import argparse
+import logging
+import time
+import json
+from datetime import timedelta
+from pathlib import Path
+from collections import defaultdict
+import os
+import xarray as xr
+
+def process_basin_pair_from_cache(d_basin, u_basin, master_upstreams_dict, cache_dir, output_dir):
+    """
+    Processes a single (d, u) pair using pre-computed aggregated forcing files.
+    """
+    try:
+        logging.info("Processing pair from cache: Downstream=%s, Upstream=%s", d_basin, u_basin)
+
+        # load cached file
+        cached_file_path = cache_dir / f"{d_basin}-aggregated.nc"
+        logging.info("Loading cached file: %s", cached_file_path)
+        ds_aggregated = xr.open_dataset(cached_file_path)
+
+        catchment_dim_name = 'catchment_id'
+
+        # Calculate forcing means for DOWNSTREAM 'd'
+        forcing_d = ds_aggregated.mean(dim=catchment_dim_name, keep_attrs=True)
+        for var in forcing_d.data_vars:
+            forcing_d = forcing_d.rename({var: f"{var}_d"})
+
+        logging.info("Calculated average for 'd' (%s)", d_basin)
+
+        # Calculate forcing means for UPSTREAM 'u'
+        upstreams_of_u = master_upstreams_dict.get(str(u_basin), [])
+        basins_for_u_avg_needed = [u_basin] + upstreams_of_u
+     
+        # Here is the real janky bit.
+        # Catchment_id is just an index counting up from 0, not the actual NHD ID.
+        # We need to find the indices of the basins we want to average.
+        available_basins_in_file = ds_aggregated["ids"].values
+        basins_to_actually_select = [b for b in basins_for_u_avg_needed 
+                                     if str(b) in available_basins_in_file]
+        catchment_id_indices = []
+        for i, available_basin in enumerate(available_basins_in_file):
+            if int(available_basin) in basins_to_actually_select:
+                catchment_id_indices.append(i)
+
+        if not basins_to_actually_select:
+            raise ValueError(f"None of the required upstreams for {u_basin} were found in the cached file for {d_basin}.")
+              
+        # Select using the validated list of available basins, then average.
+        forcing_u = ds_aggregated.sel({catchment_dim_name: catchment_id_indices}).mean(dim=catchment_dim_name, keep_attrs=True)
+        for var in forcing_u.data_vars:
+            forcing_u = forcing_u.rename({var: f"{var}_u"})
+        logging.info("Calculated average for 'u' (%s) using %d available sub-basins.", u_basin, len(basins_to_actually_select))
+
+        # 5. Combine into the final dataset
+        final_ds = xr.concat([forcing_d, forcing_u], dim="time")
+
+        # 6. Save the final preprocessed file
+        output_filename = output_dir / f"{d_basin}_{u_basin}.nc"
+        final_ds.to_netcdf(output_filename)
+       
+        # Close the dataset to release the file lock
+        ds_aggregated.close()
+       
+        return f"Successfully processed pair ({d_basin}, {u_basin})"
+
+    except Exception as e:
+        logging.error("ERROR processing pair (%s, %s): %s", d_basin, u_basin, e, exc_info=True)
+        # Make sure the file is closed even if an error occurs
+        if 'ds_aggregated' in locals() and ds_aggregated:
+            ds_aggregated.close()
+        return f"ERROR processing pair ({d_basin}, {u_basin}): {e}"
+  
+def replace_downstreams(data, downstream_col, terminal_code):
+    '''If a node is above a terminal node, set the downstream id to the negative of the current node.'''
+    ds0_mask = data[downstream_col] == terminal_code
+    new_data = data.copy()
+    new_data.loc[ds0_mask, downstream_col] = ds0_mask.index[ds0_mask]
+
+    # Also set negative any nodes in downstream col not in data.index
+    new_data.loc[~data[downstream_col].isin(data.index), downstream_col] *= -1
+    return new_data
+
+def reverse_network(network_connections):
+    '''
+    This function was sourced from the NOAA-OWP t-route codebase
+    https://github.com/NOAA-OWP/t-route
+
+    Reverse network connections graph
+    
+    Arguments:
+    ----------
+    network_connections (dict, int: [int]): downstream network connections
+    
+    Returns:
+    --------
+    rg (dict, int: [int]): upstream network connections
+    
+    '''
+    rg = defaultdict(list)
+    for src, dst in network_connections.items():
+        rg[src] # a linter may tell you this is not used. but it is used to initialize the key
+        for n in dst:
+            rg[n].append(src)
+    rg.default_factory = None
+    return rg
+
+def extract_connections(rows, target_col, terminal_codes=None):
+    '''
+    This function was sourced from the NOAA-OWP t-route codebase
+    https://github.com/NOAA-OWP/t-route
+    Extract connection network from dataframe.
+
+    Arguments:
+    ----------
+    rows (DataFrame): Dataframe indexed by key_col.
+    key_col    (str): Source of each edge
+    target_col (str): Target of edge
+
+    Returns:
+    --------
+    network (dict, int: [int]): {segment id: [list of downstream adjacent segment ids]}
+    
+    '''
+    if terminal_codes is not None:
+        terminal_codes = set(terminal_codes)
+    else:
+        terminal_codes = {0}
+
+    network = {}
+    for src, dst in rows[target_col].items():
+        if src not in network:
+            network[src] = []
+
+        if dst not in terminal_codes:
+            network[src].append(dst)
+    return network
+
+def get_upstreams(basin, upstreams, rconn):
+    '''Recursively get upstream basins.'''
+    direct_upstreams = rconn[basin]
+    for direct_upstream in direct_upstreams:
+        if direct_upstream not in upstreams:
+            upstreams.append(direct_upstream)
+            get_upstreams(direct_upstream, upstreams, rconn)
+
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Combine pre-computed forcings for d/u basin pairs."
+        )
+    parser.add_argument("-d",
+                        "--dictionary", 
+                        type=Path,
+                        help="Path to JSON file of (d, u) basin pairs.",
+                        required=True)
+    parser.add_argument("-c",
+                        "--cache_dir", 
+                        type=Path,
+                        help="Path to the directory with original -aggregated.nc files.",
+                        required=True)
+    parser.add_argument("-o",
+                        "--output_dir", 
+                        type=Path,
+                        help="Path to the final output directory.",
+                        required=True)
+    parser.add_argument("-D", "--debug", action="store_true", help="Enable debug logging.")
+    return parser.parse_args()
+
+def main():
+    """Main function to process (d, u) basin pairs."""
+    logging.basicConfig(
+        level=logging.DEBUG if parse_arguments().debug else logging.INFO)
+    args = parse_arguments()
+   
+    # so we only compute for basins that have files locally
+    cached_sites = os.listdir(args.cache_dir)
+    for i in range(len(cached_sites)):
+        cached_sites[i] = cached_sites[i].replace("-aggregated.nc", "")
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load the (d, u) basin pairs
+    with open(args.dictionary, 'r', encoding='utf-8') as f:
+        n_step_upstreams = json.load(f)
+
+    subset_upstreams = {}
+
+    # get upstreams for upstream. horrendous notation but that's all i have for today
+    all_upstreams = set()
+    for downstream, upstreams in n_step_upstreams.items():
+        if downstream not in cached_sites:
+            continue
+        # Simplify to only the first upstream for each downstream
+        subset_upstreams[downstream] = upstreams[0] 
+        all_upstreams.add(upstreams[0])
+  
+    # Set up routelink
+    routelink_ds = xr.open_dataset("../RouteLink_CONUS.nc")
+    # Subset the dataset to only the columns we want
+    subslice = [
+        "link",
+        "to",
+        "gages",
+    ]
+    routelink_df = routelink_ds[subslice].to_dataframe().astype({"link": int, "to": int,})
+    routelink_df = routelink_df.set_index("link")
+    # Reorganize RouteLink file
+    routelink_df = routelink_df.sort_index()
+    routelink_df = replace_downstreams(routelink_df, "to", 0)
+    # Extract topology from RouteLink file
+    connections = extract_connections(routelink_df, "to")
+    rconn = reverse_network(connections)
+    # recursively get upstreams
+    upstream_dict = {}
+    for basin in all_upstreams:
+        upstreams = []
+        get_upstreams(basin, upstreams, rconn)
+        upstream_dict[basin] = upstreams
+
+    tasks = []
+    for d_basin_str, u_basin in subset_upstreams.items():
+        d_basin = int(d_basin_str)
+        tasks.append((d_basin, u_basin))
+          
+    if not tasks:
+        logging.warning("No basin pairs to process. Exiting.")
+        exit()
+     
+    total_tasks = len(tasks)
+    logging.info("Found %d basin pairs to process from cache. Starting...", total_tasks)
+
+    results = []
+    start_time_total = time.time()
+
+    for i, (d_basin, u_basin) in enumerate(tasks):
+        logging.info("--- Processing task %d of %d ---", i+1, total_tasks)
+        result = process_basin_pair_from_cache(d_basin, u_basin, upstream_dict, args.cache_dir, args.output_dir)
+        results.append(result)
+       
+        elapsed_time = time.time() - start_time_total
+        avg_time_per_task = elapsed_time / (i + 1)
+        tasks_remaining = total_tasks - (i + 1)
+        estimated_time_remaining = avg_time_per_task * tasks_remaining
+        eta_str = str(timedelta(seconds=int(estimated_time_remaining)))
+        logging.info(f"Progress: {i+1}/{total_tasks} ({((i+1)/total_tasks)*100:.2f}%) complete. ETA: {eta_str}")
+
+    logging.info("\n--- Processing Complete ---")
+    success_count = 0
+    for res in results:
+        if "Successfully" in res:
+            success_count += 1
+            logging.info(res)
+        else:
+            logging.error(res)
+           
+    total_elapsed_time = time.time() - start_time_total
+    total_time_str = str(timedelta(seconds=int(total_elapsed_time)))
+    logging.info("\nTotal pairs processed: %d", total_tasks)
+    logging.info("Successful: %d", success_count)
+    logging.info("Errors: %d", len(tasks) - success_count)
+    logging.info("Total execution time: %s", total_time_str)
+    logging.info("Preprocessed files saved in '%s' directory.", args.output_dir)
+
+if __name__ == '__main__':
+    main()
+    
