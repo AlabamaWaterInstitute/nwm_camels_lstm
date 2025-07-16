@@ -37,7 +37,7 @@ def process_basin_pair_from_cache(d_basin, u_basin, master_upstreams_dict, cache
         logging.info("Calculated average for 'd' (%s)", d_basin)
 
         # Calculate forcing means for UPSTREAM 'u'
-        upstreams_of_u = master_upstreams_dict.get(str(u_basin), [])
+        upstreams_of_u = master_upstreams_dict.get(u_basin, [])
         basins_for_u_avg_needed = [u_basin] + upstreams_of_u
      
         # Here is the real janky bit.
