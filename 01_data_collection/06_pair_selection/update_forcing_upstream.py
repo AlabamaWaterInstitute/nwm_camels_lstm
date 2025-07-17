@@ -2,6 +2,11 @@
 Completes preprocessing step 2 (see issue #2 )
 https://github.com/AlabamaWaterInstitute/nwm_camels_lstm/issues/2
 
+Usage:
+python update_forcing_upstream.py -d /path/to/json/of/basin/pairs -c /path/to/dir/of/aggregated.nc/files/ -o /path/to/output/dir/
+
+Optional flag: -D for debug logging
+
 Written by Pratiksha Chaudhari (GitHub: @pratikshac15) and Quinn Lee (GitHub: @quinnylee)
 """
 
@@ -24,6 +29,11 @@ def process_basin_pair_from_cache(d_basin, u_basin, master_upstreams_dict, cache
 
         # load cached file
         cached_file_path = cache_dir / f"{d_basin}-aggregated.nc"
+        temp_file_path = output_dir / f"{d_basin}_{u_basin}_temp.nc"
+
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+            
         logging.info("Loading cached file: %s", cached_file_path)
         ds_aggregated = xr.open_dataset(cached_file_path)
 
@@ -33,6 +43,9 @@ def process_basin_pair_from_cache(d_basin, u_basin, master_upstreams_dict, cache
         forcing_d = ds_aggregated.mean(dim=catchment_dim_name, keep_attrs=True)
         for var in forcing_d.data_vars:
             forcing_d = forcing_d.rename({var: f"{var}_d"})
+        ds_aggregated.close()
+        forcing_d.to_netcdf(temp_file_path)
+        forcing_d.close()
 
         logging.info("Calculated average for 'd' (%s)", d_basin)
 
@@ -55,20 +68,23 @@ def process_basin_pair_from_cache(d_basin, u_basin, master_upstreams_dict, cache
             raise ValueError(f"None of the required upstreams for {u_basin} were found in the cached file for {d_basin}.")
               
         # Select using the validated list of available basins, then average.
+        ds_aggregated = xr.open_dataset(cached_file_path)
         forcing_u = ds_aggregated.sel({catchment_dim_name: catchment_id_indices}).mean(dim=catchment_dim_name, keep_attrs=True)
         for var in forcing_u.data_vars:
             forcing_u = forcing_u.rename({var: f"{var}_u"})
         logging.info("Calculated average for 'u' (%s) using %d available sub-basins.", u_basin, len(basins_to_actually_select))
 
         # 5. Combine into the final dataset
-        final_ds = xr.concat([forcing_d, forcing_u], dim="time")
+        ds_aggregated.close()
+        forcing_d = xr.open_dataset(temp_file_path)
+        final_ds = xr.concat([forcing_d, forcing_u], dim='time')
 
+        forcing_d.close()
+        forcing_u.close()
         # 6. Save the final preprocessed file
         output_filename = output_dir / f"{d_basin}_{u_basin}.nc"
         final_ds.to_netcdf(output_filename)
-       
-        # Close the dataset to release the file lock
-        ds_aggregated.close()
+        os.remove(temp_file_path)
        
         return f"Successfully processed pair ({d_basin}, {u_basin})"
 
@@ -229,6 +245,9 @@ def main():
     tasks = []
     for d_basin_str, u_basin in subset_upstreams.items():
         d_basin = int(d_basin_str)
+        output_name = f"{d_basin}_{u_basin}.nc"
+        if os.path.exists(os.path.join(args.output_dir, output_name)):
+            continue
         tasks.append((d_basin, u_basin))
           
     if not tasks:
