@@ -7,7 +7,8 @@ python update_forcing_upstream.py -d /path/to/json/of/basin/pairs -c /path/to/di
 
 Optional flag: -D for debug logging
 
-Written by Pratiksha Chaudhari (GitHub: @pratikshac15) and Quinn Lee (GitHub: @quinnylee)
+Written by Quinn Lee (GitHub: @quinnylee) and Pratiksha Chaudhari (GitHub: @pratikshac15)
+Inspired by code by Josh Cunningham (GitHub: @joshcu)
 """
 
 import argparse
@@ -19,6 +20,8 @@ from pathlib import Path
 from collections import defaultdict
 import os
 import xarray as xr
+from dask.distributed import Client, LocalCluster
+import shutil
 
 def process_basin_pair_from_cache(d_basin, u_basin, master_upstreams_dict, cache_dir, output_dir):
     """
@@ -29,25 +32,35 @@ def process_basin_pair_from_cache(d_basin, u_basin, master_upstreams_dict, cache
 
         # load cached file
         cached_file_path = cache_dir / f"{d_basin}-aggregated.nc"
-        temp_file_path = output_dir / f"{d_basin}_{u_basin}_temp.nc"
+        temp_file_path = output_dir / f"{d_basin}_{u_basin}_temp/"
 
         if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
+            shutil.rmtree(temp_file_path)
+        os.makedirs(temp_file_path)
             
         logging.info("Loading cached file: %s", cached_file_path)
         ds_aggregated = xr.open_dataset(cached_file_path)
 
         catchment_dim_name = 'catchment_id'
+        vars = ["DLWRF_surface", "PRES_surface", "SPFH_2maboveground", "precip_rate", "DSWRF_surface",
+                "TMP_2maboveground", "UGRD_10maboveground", "VGRD_10maboveground", "APCP_surface"]
+        
+        try:
+            client = Client.current()
+        except ValueError:
+            cluster = LocalCluster()
+            client = Client(cluster)
 
         # Calculate forcing means for DOWNSTREAM 'd'
-        forcing_d = ds_aggregated.mean(dim=catchment_dim_name, keep_attrs=True)
-        for var in forcing_d.data_vars:
-            forcing_d = forcing_d.rename({var: f"{var}_d"})
-        ds_aggregated.close()
-        forcing_d.to_netcdf(temp_file_path)
-        forcing_d.close()
+        for var in vars:
+            var_forcings_d = ds_aggregated[var]
+            var_d_average = var_forcings_d.mean(dim=catchment_dim_name, keep_attrs=True)
+            var_d_average = var_d_average.rename(f"{var}_d")
+            var_d_average.to_netcdf(temp_file_path / f"{var}_d.nc")
+            var_forcings_d.close()
+            var_d_average.close()
 
-        logging.info("Calculated average for 'd' (%s)", d_basin)
+        logging.info("Calculated averages for 'd' (%s)", d_basin)
 
         # Calculate forcing means for UPSTREAM 'u'
         upstreams_of_u = master_upstreams_dict.get(u_basin, [])
@@ -68,23 +81,36 @@ def process_basin_pair_from_cache(d_basin, u_basin, master_upstreams_dict, cache
             raise ValueError(f"None of the required upstreams for {u_basin} were found in the cached file for {d_basin}.")
               
         # Select using the validated list of available basins, then average.
+        # quinn note: start here tomorrow!!
         ds_aggregated = xr.open_dataset(cached_file_path)
-        forcing_u = ds_aggregated.sel({catchment_dim_name: catchment_id_indices}).mean(dim=catchment_dim_name, keep_attrs=True)
-        for var in forcing_u.data_vars:
-            forcing_u = forcing_u.rename({var: f"{var}_u"})
+        forcing_u = ds_aggregated.sel({catchment_dim_name: catchment_id_indices})
+        ds_aggregated.close()
+
+        for var in vars:
+            var_forcings_u = forcing_u[var]
+            var_u_average = var_forcings_u.mean(dim=catchment_dim_name, keep_attrs=True)
+            var_u_average = var_u_average.rename(f"{var}_u")
+            var_u_average.to_netcdf(temp_file_path / f"{var}_u.nc")
+            var_forcings_u.close()
+            var_u_average.close()
+
+        forcing_u.close()
         logging.info("Calculated average for 'u' (%s) using %d available sub-basins.", u_basin, len(basins_to_actually_select))
 
-        # 5. Combine into the final dataset
-        ds_aggregated.close()
-        forcing_d = xr.open_dataset(temp_file_path)
-        final_ds = xr.concat([forcing_d, forcing_u], dim='time')
+        # 5. Combine into the final dataset 
 
-        forcing_d.close()
-        forcing_u.close()
+        results = [xr.open_dataset(file, chunks="auto") for file in temp_file_path.glob("*.nc")]
+        final_ds = xr.merge(results)
+
+        logging.info("Saving to disk")
+
         # 6. Save the final preprocessed file
         output_filename = output_dir / f"{d_basin}_{u_basin}.nc"
-        final_ds.to_netcdf(output_filename)
-        os.remove(temp_file_path)
+        final_ds.to_netcdf(output_filename, engine="netcdf4")
+
+        # # close everything and clean up
+        _ = [result.close() for result in results]
+        shutil.rmtree(temp_file_path)
        
         return f"Successfully processed pair ({d_basin}, {u_basin})"
 
