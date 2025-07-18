@@ -54,7 +54,7 @@ def main():
     # Define file paths. Assumes RouteLink and camels_basins are in the parent directory.
     script_dir = os.path.dirname(__file__)
     routelink_path = os.path.join(script_dir, '../RouteLink_CONUS.nc')
-    basins_path = os.path.join(script_dir, '../02_get_upstream_basins/alabama_basins.txt')
+    basins_path = os.path.join(script_dir, '../02_get_upstream_basins/camels_basins.txt')
     
     # --- 1. Load Data and Build Network ---
     print(f"Loading RouteLink file from: {routelink_path}")
@@ -83,7 +83,7 @@ def main():
     # --- 2. Process CAMELS Basins ---
     print(f"Loading CAMELS basins from: {basins_path}")
     if not os.path.exists(basins_path):
-        print(f"ERROR: alabama_basins.txt not found at {basins_path}")
+        print(f"ERROR: basin text file not found at {basins_path}")
         return
         
     with open(basins_path, 'r') as f:
@@ -97,7 +97,7 @@ def main():
             upstream_dict[basin] = n_step_upstreams
 
     # --- 3. Save Results ---
-    output_filename = f'alabama_n{n}_upstream_dict.json'
+    output_filename = f'camels_n{n}_upstream_dict.json'
     with open(output_filename, 'w') as f:
         json.dump(upstream_dict, f, indent=2)
 
