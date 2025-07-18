@@ -3,7 +3,11 @@ Completes preprocessing step 2 (see issue #2 )
 https://github.com/AlabamaWaterInstitute/nwm_camels_lstm/issues/2
 
 Usage:
-python update_forcing_upstream.py -d /path/to/json/of/basin/pairs -c /path/to/dir/of/aggregated.nc/files/ -o /path/to/output/dir/
+python final_preprocessing.py 
+-d /path/to/json/of/basin/pairs 
+-c /path/to/dir/of/aggregated.nc/files/ 
+-s /path/to/streamflow/dir/ 
+-o /path/to/output/dir/
 
 Optional flag: -D for debug logging
 
@@ -23,9 +27,10 @@ import xarray as xr
 from dask.distributed import Client, LocalCluster
 import shutil
 
-def process_basin_pair_from_cache(d_basin, u_basin, master_upstreams_dict, cache_dir, output_dir):
+def process_basin_pair_from_cache(d_basin, u_basin, master_upstreams_dict, cache_dir, output_dir, streamflow_dir):
     """
     Processes a single (d, u) pair using pre-computed aggregated forcing files.
+    Averages meteorological forcing values and appends streamflow.
     """
     try:
         logging.info("Processing pair from cache: Downstream=%s, Upstream=%s", d_basin, u_basin)
@@ -40,6 +45,7 @@ def process_basin_pair_from_cache(d_basin, u_basin, master_upstreams_dict, cache
             
         logging.info("Loading cached file: %s", cached_file_path)
         ds_aggregated = xr.open_dataset(cached_file_path)
+        ds_aggregated = ds_aggregated.isel(time=slice(379897)) # streamflow data is smalelr than forcings
 
         catchment_dim_name = 'catchment_id'
         vars = ["DLWRF_surface", "PRES_surface", "SPFH_2maboveground", "precip_rate", "DSWRF_surface",
@@ -81,8 +87,8 @@ def process_basin_pair_from_cache(d_basin, u_basin, master_upstreams_dict, cache
             raise ValueError(f"None of the required upstreams for {u_basin} were found in the cached file for {d_basin}.")
               
         # Select using the validated list of available basins, then average.
-        # quinn note: start here tomorrow!!
         ds_aggregated = xr.open_dataset(cached_file_path)
+        ds_aggregated = ds_aggregated.isel(time=slice(379897))
         forcing_u = ds_aggregated.sel({catchment_dim_name: catchment_id_indices})
         ds_aggregated.close()
 
@@ -97,18 +103,35 @@ def process_basin_pair_from_cache(d_basin, u_basin, master_upstreams_dict, cache
         forcing_u.close()
         logging.info("Calculated average for 'u' (%s) using %d available sub-basins.", u_basin, len(basins_to_actually_select))
 
-        # 5. Combine into the final dataset 
+        # append streamflow data
+        sf_filepath = streamflow_dir / f"{d_basin}-streamflow.nc"
+        streamflow = xr.open_dataset(sf_filepath)
+
+        streamflow_d = streamflow['streamflow'].sel(catchment_id=d_basin)
+        streamflow_d = streamflow_d.rename('streamflow_d').drop_vars("catchment_id")
+        streamflow_d.to_netcdf(temp_file_path / "streamflow_d.nc")
+        streamflow_d.close()
+
+        streamflow_u = streamflow['streamflow'].sel(catchment_id=u_basin)
+        streamflow_u = streamflow_u.rename('streamflow_u').drop_vars("catchment_id")
+        streamflow_u.to_netcdf(temp_file_path/ "streamflow_u.nc")
+
+        streamflow_u.close()
+        streamflow.close()
+        
+        logging.info("Appended streamflows.")
+        # Combine into the final dataset 
 
         results = [xr.open_dataset(file, chunks="auto") for file in temp_file_path.glob("*.nc")]
         final_ds = xr.merge(results)
 
         logging.info("Saving to disk")
 
-        # 6. Save the final preprocessed file
+        # Save the final preprocessed file
         output_filename = output_dir / f"{d_basin}_{u_basin}.nc"
         final_ds.to_netcdf(output_filename, engine="netcdf4")
 
-        # # close everything and clean up
+        # close everything and clean up
         _ = [result.close() for result in results]
         shutil.rmtree(temp_file_path)
        
@@ -209,6 +232,11 @@ def parse_arguments():
                         type=Path,
                         help="Path to the directory with original -aggregated.nc files.",
                         required=True)
+    parser.add_argument("-s",
+                        "--streamflow",
+                        type=Path,
+                        help="Path to directory of streamflow data",
+                        required=True)
     parser.add_argument("-o",
                         "--output_dir", 
                         type=Path,
@@ -288,7 +316,7 @@ def main():
 
     for i, (d_basin, u_basin) in enumerate(tasks):
         logging.info("--- Processing task %d of %d ---", i+1, total_tasks)
-        result = process_basin_pair_from_cache(d_basin, u_basin, upstream_dict, args.cache_dir, args.output_dir)
+        result = process_basin_pair_from_cache(d_basin, u_basin, upstream_dict, args.cache_dir, args.output_dir, args.streamflow)
         results.append(result)
        
         elapsed_time = time.time() - start_time_total
