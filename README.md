@@ -27,7 +27,16 @@ For specific usage instructions for each notebook or script, please view the hea
 NetCDF data outputs (forcings and streamflow) are stored at `s3://camels-nwm-reanalysis`. **Note: This bucket is incomplete**
 
 ## Installation
-We recommend using two separate virtual environments, one for data collection and one for the LSTM. For data collection, a list of dependencies is listed in `01_dependencies.txt`. For the LSTM portion (sections 2 and 3), please follow the official [NeuralHydrology instructions](https://neuralhydrology.readthedocs.io/en/latest/index.html).
+We recommend using two separate virtual environments, one for data collection and one for the LSTM. 
+
+For data collection, a list of dependencies is listed in `01_data_collection/01_dependencies.txt`. To install this, do
+```
+python -m venv name_of_your_venv
+source name_of_your_venv/bin/activate
+pip install -r 01_data_collection/01_dependencies.txt
+```
+
+For the LSTM portion (sections 2 and 3), please follow the official [NeuralHydrology instructions](https://neuralhydrology.readthedocs.io/en/latest/index.html). We do recommend using `venv` instead of `conda`, though.
 
 ## Credits
 Our code is heavily inspired by work done by Josh Cunningham (@JoshCu) and James Halgren (@jameshalgren). This code was authored by Quinn Lee (@quinnylee) and Sonam Lama (@slama0077).
