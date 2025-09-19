@@ -12,3 +12,6 @@ pyarrow
 zarr==2.17.1
 numcodecs<0.16.0
 netCDF4>=1.6.5
+tqdm
+jupyter
+ipywidgets
