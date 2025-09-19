@@ -11,3 +11,4 @@ index.html
 01_data_collection/05_streamflow/append_flow.py
 01_data_collection/06_final_preprocessing/outputs/
 01_data_collection/05_streamflow/outputs/
+miscellaneous_tools/*.json
